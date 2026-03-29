@@ -23,7 +23,13 @@
     "three": ">=0.125.0"
   },
   "devDependencies": {
+    "@babel/core": "^7.29.0",
+    "@babel/plugin-transform-class-properties": "^7.28.6",
+    "@babel/plugin-transform-logical-assignment-operators": "^7.28.6",
+    "@babel/plugin-transform-nullish-coalescing-operator": "^7.28.6",
+    "@babel/plugin-transform-optional-chaining": "^7.28.6",
     "@lojjic/typr": "0.3.8-lojjic1",
+    "@rollup/plugin-babel": "^5.3.1",
     "@unicode-font-resolver/client": "1.0.2",
     "fflate": "^0.7.0",
     "harfbuzzjs": "^0.10.1",

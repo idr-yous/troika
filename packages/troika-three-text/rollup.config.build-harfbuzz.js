@@ -5,6 +5,7 @@
 import nodeResolve from "rollup-plugin-node-resolve";
 import commonjs from "@rollup/plugin-commonjs";
 import replace from "rollup-plugin-replace";
+import { babel } from "@rollup/plugin-babel";
 import { terser } from "rollup-plugin-terser";
 
 const { LERNA_ROOT_PATH } = process.env;
@@ -46,6 +47,24 @@ export default {
       "require('fs')": "{}",
       'require("fs")': "{}",
       delimiters: ["", ""],
+    }),
+    babel({
+      babelHelpers: "bundled",
+      presets: [
+        [
+          "@babel/preset-env",
+          {
+            targets: { chrome: "60" },
+            modules: false,
+          },
+        ],
+      ],
+      plugins: [
+        "@babel/plugin-transform-class-properties",
+        "@babel/plugin-transform-optional-chaining",
+        "@babel/plugin-transform-logical-assignment-operators",
+        "@babel/plugin-transform-nullish-coalescing-operator",
+      ],
     }),
     terser({
       ecma: 2017, // hb.js uses async/await
