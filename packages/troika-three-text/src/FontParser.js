@@ -527,8 +527,14 @@ function parserFactory(Typr, woff2otf, getHb) {
  */
 export function createFontParserModule({ harfbuzzWasmUrl } = {}) {
   if (harfbuzzWasmUrl) {
-    // Create a factory function whose .toString() captures the URL
-    const urlFactory = new Function(`return ${JSON.stringify(harfbuzzWasmUrl)}`);
+    // Resolve to absolute URL on the main thread. Blob Workers have no origin,
+    // so relative paths like "/hb.wasm" would fail in fetch() inside the worker.
+    const absoluteUrl =
+      typeof window !== "undefined" && harfbuzzWasmUrl.startsWith("/")
+        ? new URL(harfbuzzWasmUrl, window.location.origin).href
+        : harfbuzzWasmUrl;
+    // Create a factory function whose .toString() captures the absolute URL
+    const urlFactory = new Function(`return ${JSON.stringify(absoluteUrl)}`);
     return defineWorkerModule({
       name: "Typr Font Parser",
       dependencies: [typrFactory, woff2otfFactory, parserFactory, harfbuzzFactory, urlFactory],
