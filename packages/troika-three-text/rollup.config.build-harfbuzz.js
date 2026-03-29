@@ -25,6 +25,10 @@ export default function() {
     self.window = self
   }
 
+  // Shadow Node.js globals so bundlers (Turbopack) won't inject polyfill modules
+  // that don't exist inside blob Workers
+  var process, __filename, __dirname;
+
   $$CONTENT$$
 
   return HarfbuzzExports
