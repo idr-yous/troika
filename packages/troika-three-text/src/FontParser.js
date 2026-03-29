@@ -543,7 +543,7 @@ export function createFontParserModule({ harfbuzzWasmUrl } = {}) {
         // until WASM is ready, then the hb instance. Fonts lazily create
         // their HB handles on first forEachGlyph call.
         let hb = null;
-        fetch(wasmUrl)
+        fetch(wasmUrl())
           .then((response) => {
             if (!response.ok) throw new Error(`Failed to fetch HarfBuzz WASM: ${response.status}`);
             return response.arrayBuffer();
