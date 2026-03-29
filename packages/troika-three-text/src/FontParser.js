@@ -28,7 +28,7 @@ import { defineWorkerModule } from "troika-worker-utils";
 /**
  * @returns {FontParser}
  */
-function parserFactory(Typr, woff2otf, hb) {
+function parserFactory(Typr, woff2otf, getHb) {
   const cmdArgLengths = {
     M: 2,
     L: 2,
@@ -322,15 +322,26 @@ function parserFactory(Typr, woff2otf, hb) {
   function wrapFontObj(typrFont, buffer) {
     const glyphMap = Object.create(null);
 
-    // Create HarfBuzz font objects if HarfBuzz is available
+    // HarfBuzz font handle — created lazily when WASM becomes available.
+    // This avoids the async init problem: troika-worker-utils resolves
+    // dependencies synchronously, so the parser init must be sync too.
+    // The getHb() getter returns null until WASM loads, then the HB instance.
     let hbFont = null;
-    if (hb) {
+    let hbInitFailed = false;
+    function ensureHbFont() {
+      if (hbFont) return hbFont;
+      if (hbInitFailed) return null;
+      const hb = getHb ? getHb() : null;
+      if (!hb) return null;
       try {
         const blob = hb.createBlob(buffer);
         const face = hb.createFace(blob, 0);
         hbFont = hb.createFont(face);
+        return hbFont;
       } catch (e) {
         console.warn("Failed to create HarfBuzz font, falling back to Typr shaping:", e);
+        hbInitFailed = true;
+        return null;
       }
     }
 
@@ -398,9 +409,12 @@ function parserFactory(Typr, woff2otf, hb) {
         return Typr.U.codeToGlyph(typrFont, code) > 0;
       },
       forEachGlyph(text, fontSize, letterSpacing, callback) {
-        // Use HarfBuzz shaping when available, fall back to Typr
-        if (hbFont) {
-          return forEachGlyphHarfbuzz(fontObj, hbFont, text, fontSize, letterSpacing, callback, getGlyphObj);
+        // Use HarfBuzz shaping when available, fall back to Typr.
+        // ensureHbFont() lazily creates the HB font handle once WASM loads.
+        const hf = ensureHbFont();
+        if (hf) {
+          const hb = getHb();
+          return forEachGlyphHarfbuzz(fontObj, hf, hb, text, fontSize, letterSpacing, callback, getGlyphObj);
         }
         return forEachGlyphTypr(typrFont, fontObj, text, fontSize, letterSpacing, callback, getGlyphObj);
       },
@@ -415,7 +429,7 @@ function parserFactory(Typr, woff2otf, hb) {
    * Multiple Substitution), GPOS (kerning, mark positioning), and complex
    * script shaping (Arabic, Devanagari, etc.)
    */
-  function forEachGlyphHarfbuzz(fontObj, hbFont, text, fontSize, letterSpacing, callback, getGlyphObj) {
+  function forEachGlyphHarfbuzz(fontObj, hbFont, hb, text, fontSize, letterSpacing, callback, getGlyphObj) {
     let penX = 0;
     const fontScale = (1 / fontObj.unitsPerEm) * fontSize;
 
@@ -522,16 +536,29 @@ export function createFontParserModule({ harfbuzzWasmUrl } = {}) {
         const Typr = typrFactory();
         const woff2otf = woff2otfFactory();
         const harfbuzz = harfbuzzFactory();
-        return fetch(wasmUrl)
+
+        // Load HarfBuzz WASM asynchronously in the background.
+        // troika-worker-utils resolves deps synchronously, so we MUST NOT
+        // return a Promise. Instead we use a closure: getHb() returns null
+        // until WASM is ready, then the hb instance. Fonts lazily create
+        // their HB handles on first forEachGlyph call.
+        let hb = null;
+        fetch(wasmUrl)
           .then((response) => {
             if (!response.ok) throw new Error(`Failed to fetch HarfBuzz WASM: ${response.status}`);
             return response.arrayBuffer();
           })
           .then((wasmBinary) => harfbuzz.createHarfBuzz({ wasmBinary }))
           .then((instance) => {
-            const hb = harfbuzz.hbjs(instance);
-            return parserFactory(Typr, woff2otf, hb);
+            hb = harfbuzz.hbjs(instance);
+          })
+          .catch((err) => {
+            console.warn("HarfBuzz WASM loading failed, using Typr fallback:", err);
           });
+
+        return parserFactory(Typr, woff2otf, function getHb() {
+          return hb;
+        });
       },
     });
   }
@@ -543,7 +570,7 @@ export function createFontParserModule({ harfbuzzWasmUrl } = {}) {
     init(typrFactory, woff2otfFactory, parserFactory) {
       const Typr = typrFactory();
       const woff2otf = woff2otfFactory();
-      return parserFactory(Typr, woff2otf, null);
+      return parserFactory(Typr, woff2otf, null); // no HarfBuzz getter
     },
   });
 }
