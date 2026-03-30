@@ -428,40 +428,151 @@ function parserFactory(Typr, woff2otf, getHb) {
    * HarfBuzz handles ALL OpenType features correctly: GSUB (including Type 2
    * Multiple Substitution), GPOS (kerning, mark positioning), and complex
    * script shaping (Arabic, Devanagari, etc.)
+   *
+   * IMPORTANT: HarfBuzz returns glyphs in VISUAL order, but troika's Typesetter
+   * expects them in LOGICAL order (same order as the input string) and handles
+   * bidi reordering itself. We must sort by cluster (= charIndex) before calling
+   * the callback, otherwise the Typesetter's ligature caret filling and bidi
+   * flip code will produce wrong caret positions.
+   *
+   * We do NOT call buf.guessSegmentProperties() because it picks a single
+   * script for the entire buffer, which breaks mixed-script text (e.g. Arabic
+   * + Latin). Instead we itemize the text into script runs and shape each run
+   * with an explicit HarfBuzz script tag and direction.
    */
-  function forEachGlyphHarfbuzz(fontObj, hbFont, hb, text, fontSize, letterSpacing, callback, getGlyphObj) {
-    let penX = 0;
-    const fontScale = (1 / fontObj.unitsPerEm) * fontSize;
 
-    const buf = hb.createBuffer();
-    buf.addText(text);
-    buf.guessSegmentProperties();
-    hb.shape(hbFont, buf);
-    const result = buf.json();
-    buf.destroy();
+  var SCRIPT_RANGES = [
+    {
+      tag: "Hebr",
+      direction: "rtl",
+      ranges: [
+        [0x0590, 0x05ff],
+        [0xfb1d, 0xfb4f],
+      ],
+    },
+    {
+      tag: "Arab",
+      direction: "rtl",
+      ranges: [
+        [0x0600, 0x06ff],
+        [0x0750, 0x077f],
+        [0x08a0, 0x08ff],
+        [0xfb50, 0xfdff],
+        [0xfe70, 0xfeff],
+      ],
+    },
+    { tag: "Syrc", direction: "rtl", ranges: [[0x0700, 0x074f]] },
+    { tag: "Thaa", direction: "rtl", ranges: [[0x0780, 0x07bf]] },
+    { tag: "Nkoo", direction: "rtl", ranges: [[0x07c0, 0x07ff]] },
+    { tag: "Mand", direction: "rtl", ranges: [[0x0840, 0x085f]] },
+    { tag: "Thai", direction: "ltr", ranges: [[0x0e00, 0x0e7f]] },
+    {
+      tag: "Latn",
+      direction: "ltr",
+      ranges: [
+        [0x0041, 0x005a],
+        [0x0061, 0x007a],
+        [0x00c0, 0x024f],
+        [0x1e00, 0x1eff],
+      ],
+    },
+  ];
 
-    let prevCluster = -1;
-    for (let i = 0; i < result.length; i++) {
-      const { g: glyphId, cl: cluster, ax, dx, dy } = result[i];
-      if (glyphId === 0) continue; // .notdef glyph — skip
-
-      const glyphObj = getGlyphObj(glyphId);
-
-      callback.call(
-        null,
-        glyphObj,
-        penX + dx * fontScale,
-        dy * fontScale,
-        cluster, // HarfBuzz cluster = UTF-16 offset in input string
-      );
-
-      penX += ax * fontScale;
-
-      // Add letter spacing between cluster boundaries (new character)
-      if (letterSpacing && cluster !== prevCluster) {
-        penX += letterSpacing * fontSize;
+  function getScriptInfo(codePoint) {
+    for (var i = 0; i < SCRIPT_RANGES.length; i++) {
+      var script = SCRIPT_RANGES[i];
+      for (var j = 0; j < script.ranges.length; j++) {
+        var range = script.ranges[j];
+        if (codePoint >= range[0] && codePoint <= range[1]) {
+          return script;
+        }
       }
-      prevCluster = cluster;
+    }
+    return null;
+  }
+
+  function itemizeScriptRuns(text) {
+    var runs = [];
+    var currentScript = null;
+    var runStart = 0;
+    var i = 0;
+
+    while (i < text.length) {
+      var codePoint = text.codePointAt(i);
+      var codeUnitLength = codePoint > 0xffff ? 2 : 1;
+      var script = getScriptInfo(codePoint);
+
+      if (script) {
+        if (!currentScript) {
+          currentScript = script;
+        } else if (script.tag !== currentScript.tag) {
+          runs.push({
+            text: text.slice(runStart, i),
+            start: runStart,
+            script: currentScript.tag,
+            direction: currentScript.direction,
+          });
+          runStart = i;
+          currentScript = script;
+        }
+      }
+
+      i += codeUnitLength;
+    }
+
+    if (!currentScript) {
+      currentScript = { tag: "Latn", direction: "ltr" };
+    }
+
+    runs.push({
+      text: text.slice(runStart),
+      start: runStart,
+      script: currentScript.tag,
+      direction: currentScript.direction,
+    });
+
+    return runs;
+  }
+
+  function forEachGlyphHarfbuzz(fontObj, hbFont, hb, text, fontSize, letterSpacing, callback, getGlyphObj) {
+    const fontScale = (1 / fontObj.unitsPerEm) * fontSize;
+    let penX = 0;
+    let prevCluster = -1;
+
+    var runs = itemizeScriptRuns(text);
+    for (let ri = 0; ri < runs.length; ri++) {
+      const run = runs[ri];
+      const buf = hb.createBuffer();
+      buf.addText(run.text);
+      buf.setDirection(run.direction);
+      buf.setScript(run.script);
+      hb.shape(hbFont, buf);
+      const result = buf.json();
+      buf.destroy();
+
+      const glyphs = [];
+      for (let i = 0; i < result.length; i++) {
+        const { g: glyphId, cl: cluster, ax, dx, dy } = result[i];
+        glyphs.push({ glyphId, cluster: cluster + run.start, ax, dx, dy });
+      }
+
+      // HarfBuzz returns visual order per run. Troika expects logical order.
+      glyphs.sort((a, b) => a.cluster - b.cluster);
+
+      for (let gi = 0; gi < glyphs.length; gi++) {
+        const { glyphId, cluster, ax, dx, dy } = glyphs[gi];
+        const glyphObj = getGlyphObj(glyphId);
+
+        // Add letter spacing between cluster boundaries (new character)
+        if (letterSpacing && cluster !== prevCluster && prevCluster !== -1) {
+          penX += letterSpacing * fontSize;
+        }
+
+        callback.call(null, glyphObj, penX + dx * fontScale, dy * fontScale, cluster);
+
+        penX += ax * fontScale;
+        prevCluster = cluster;
+      }
     }
 
     return penX;
