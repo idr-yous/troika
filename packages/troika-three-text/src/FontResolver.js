@@ -59,13 +59,22 @@ export function createFontResolver(fontParser, unicodeFontResolverClient) {
         if (request.status >= 400) {
           onError(new Error(request.statusText));
         } else if (request.status > 0) {
-          try {
-            const fontObj = fontParser(request.response);
-            fontObj.src = url;
-            callback(fontObj);
-          } catch (e) {
-            onError(e);
-          }
+          // Defer parsing until HarfBuzz is ready (when configured) so glyph
+          // shaping is deterministic across parallel render tabs — otherwise a
+          // font parsed before the WASM loads shapes via the Typr fallback with
+          // slightly different advances. See `whenReady` in FontParser. Falls
+          // through immediately when there's no HarfBuzz to wait for.
+          const finishParse = () => {
+            try {
+              const fontObj = fontParser(request.response);
+              fontObj.src = url;
+              callback(fontObj);
+            } catch (e) {
+              onError(e);
+            }
+          };
+          if (fontParser.whenReady) fontParser.whenReady(finishParse);
+          else finishParse();
         }
       };
       request.onerror = onError;

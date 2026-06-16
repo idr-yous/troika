@@ -660,6 +660,24 @@ export function createFontParserModule({ harfbuzzWasmUrl } = {}) {
         // until WASM is ready, then the hb instance. Fonts lazily create
         // their HB handles on first forEachGlyph call.
         let hb = null;
+        // Track HarfBuzz readiness so font parsing can be deferred until the
+        // WASM has finished loading (or definitively failed). Without this gate,
+        // any text shaped before the background load completes silently falls
+        // back to Typr shaping, which produces slightly different glyph
+        // advances. Under Remotion's parallel multi-tab rendering each tab loses
+        // that race on a different frame, so the same text shapes differently
+        // across tabs and the exported video shows a ~1px horizontal "jitter".
+        // Gating parse on readiness makes every tab shape with HarfBuzz,
+        // deterministically. (Shapes never used the glyph atlas, so they were
+        // never affected.)
+        let hbSettled = false;
+        const hbReadyCallbacks = [];
+        function settleHb() {
+          hbSettled = true;
+          while (hbReadyCallbacks.length) {
+            hbReadyCallbacks.shift()();
+          }
+        }
         fetch(wasmUrl())
           .then((response) => {
             if (!response.ok) throw new Error(`Failed to fetch HarfBuzz WASM: ${response.status}`);
@@ -671,11 +689,20 @@ export function createFontParserModule({ harfbuzzWasmUrl } = {}) {
           })
           .catch((err) => {
             console.warn("HarfBuzz WASM loading failed, using Typr fallback:", err);
-          });
+          })
+          .then(settleHb); // settle on both success and failure
 
-        return parserFactory(Typr, woff2otf, function getHb() {
+        const parse = parserFactory(Typr, woff2otf, function getHb() {
           return hb;
         });
+        // Invoke `cb` once HarfBuzz is ready (or has failed) — immediately if
+        // already settled. The font resolver uses this to defer parsing so that
+        // shaping is deterministic. See doLoadFont in FontResolver.
+        parse.whenReady = function (cb) {
+          if (hbSettled) cb();
+          else hbReadyCallbacks.push(cb);
+        };
+        return parse;
       },
     });
   }
@@ -687,7 +714,11 @@ export function createFontParserModule({ harfbuzzWasmUrl } = {}) {
     init(typrFactory, woff2otfFactory, parserFactory) {
       const Typr = typrFactory();
       const woff2otf = woff2otfFactory();
-      return parserFactory(Typr, woff2otf, null); // no HarfBuzz getter
+      const parse = parserFactory(Typr, woff2otf, null); // no HarfBuzz getter
+      parse.whenReady = function (cb) {
+        cb();
+      }; // no HarfBuzz to wait for — parse immediately
+      return parse;
     },
   });
 }
