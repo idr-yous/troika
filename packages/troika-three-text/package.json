@@ -10,6 +10,11 @@
   },
   "license": "MIT",
   "sideEffects": false,
+  "files": [
+    "dist",
+    "src",
+    "libs"
+  ],
   "main": "dist/troika-three-text.umd.js",
   "module": "dist/troika-three-text.esm.js",
   "module:src": "src/index.js",
